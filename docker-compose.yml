@@ -1,0 +1,99 @@
+services:
+  # Основное приложение TrackerBot
+  trackerbot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trackerbot-rates
+    ports:
+      - "8000:8000"  # Основной порт для API и фронтенда
+      - "3000:8000"  # Дополнительный порт для совместимости
+    volumes:
+      # Монтируем директорию для базы данных чтобы данные сохранялись
+      - ./data:/app/backend/data
+      # Опционально: монтируем конфигурационные файлы
+      - ./config:/app/config:ro
+    environment:
+      # Переменные окружения для приложения
+      - PYTHONPATH=/app/backend
+      - REACT_APP_BACKEND_URL=http://localhost:8000
+      # Настройки базы данных
+      - DATABASE_PATH=/app/backend/data/rates.db
+      # Настройки логирования
+      - LOG_LEVEL=INFO
+      # Часовой пояс
+      - TZ=Asia/Bangkok
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.trackerbot.rule=Host(`localhost`)"
+      - "traefik.http.services.trackerbot.loadbalancer.server.port=8000"
+
+  # Веб-сервер Nginx для статических файлов (опционально)
+  nginx:
+    image: nginx:alpine
+    container_name: trackerbot-nginx
+    ports:
+      - "80:80"   # HTTP
+      - "443:443" # HTTPS (если настроен SSL)
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/build:/usr/share/nginx/html:ro
+      - ./ssl:/etc/nginx/ssl:ro  # SSL сертификаты (если есть)
+    depends_on:
+      - trackerbot
+    restart: unless-stopped
+    profiles:
+      - "production"  # Включается только в production режиме
+
+  # Backup сервис для регулярного создания резервных копий
+  backup:
+    image: alpine:latest
+    container_name: trackerbot-backup
+    volumes:
+      - ./data:/app/data:ro
+      - ./backups:/backups
+    environment:
+      - TZ=Asia/Bangkok
+    command: >
+      sh -c "
+        echo 'Setting up backup service...'
+        apk add --no-cache sqlite
+        while true; do
+          echo 'Creating backup...'
+          timestamp=$$(date +%Y%m%d_%H%M%S)
+          sqlite3 /app/data/rates.db '.backup /backups/rates_backup_$$timestamp.db'
+          echo 'Backup created: rates_backup_$$timestamp.db'
+          # Удаляем старые бэкапы (старше 7 дней)
+          find /backups -name 'rates_backup_*.db' -mtime +7 -delete
+          # Ждем 6 часов до следующего бэкапа
+          sleep 21600
+        done
+      "
+    restart: unless-stopped
+    profiles:
+      - "backup"  # Включается только при явном указании профиля
+
+# Настройка сетей
+networks:
+  default:
+    name: trackerbot-network
+    driver: bridge
+
+# Именованные тома для данных
+volumes:
+  app_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data
+
+  nginx_logs:
+    driver: local
